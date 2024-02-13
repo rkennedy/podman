@@ -66,6 +66,10 @@ const (
 	HealthConfigTestCmd = "CMD"
 	// HealthConfigTestCmdShell runs commands with the system's default shell
 	HealthConfigTestCmdShell = "CMD-SHELL"
+	// HealthConfigTestHttpGet sends an HTTP request to the given address
+	HealthConfigTestHttpGet = "HTTP-GET"
+	// HealthConfigTestTcp attempts to open a socket
+	HealthConfigTestTcp = "TCP"
 )
 
 // HealthCheckOnFailureAction defines how Podman reacts when a container's health

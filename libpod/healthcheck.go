@@ -80,6 +80,10 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	case define.HealthConfigTestCmdShell:
 		// TODO: SHELL command from image not available in Container - use Docker default
 		newCommand = []string{"/bin/sh", "-c", strings.Join(hcCommand[1:], " ")}
+	case define.HealthConfigTestHttpGet:
+		newCommand = []string{} // TODO
+	case define.HealthConfigTestTcp:
+		newCommand = []string{} // TODO
 	default:
 		// command supplied on command line - pass as-is
 		newCommand = hcCommand
