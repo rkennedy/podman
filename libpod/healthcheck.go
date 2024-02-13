@@ -57,43 +57,35 @@ func (r *Runtime) HealthCheck(ctx context.Context, name string) (define.HealthCh
 	return hcStatus, err
 }
 
-func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.HealthCheckStatus, string, error) {
-	var (
-		newCommand    []string
-		returnCode    int
-		inStartPeriod bool
-	)
+type healthChecker interface {
+	Defined() bool
+	TimeStart() time.Time
+	Perform(c *Container) (status define.HealthCheckStatus, exitCode int, retErr error)
+	Events() []string
+}
 
-	hcCommand := c.HealthCheckConfig().Test
-	if isStartup {
-		logrus.Debugf("Running startup healthcheck for container %s", c.ID())
-		hcCommand = c.config.StartupHealthCheckConfig.Test
-	}
-	if len(hcCommand) < 1 {
-		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
-	}
-	switch hcCommand[0] {
-	case "", define.HealthConfigTestNone:
-		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
-	case define.HealthConfigTestCmd:
-		newCommand = hcCommand[1:]
-	case define.HealthConfigTestCmdShell:
-		// TODO: SHELL command from image not available in Container - use Docker default
-		newCommand = []string{"/bin/sh", "-c", strings.Join(hcCommand[1:], " ")}
-	case define.HealthConfigTestHttpGet:
-		newCommand = []string{} // TODO
-	case define.HealthConfigTestTcp:
-		newCommand = []string{} // TODO
-	default:
-		// command supplied on command line - pass as-is
-		newCommand = hcCommand
-	}
-	if len(newCommand) < 1 || newCommand[0] == "" {
-		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
-	}
+type commandHealthChecker struct {
+	newCommand []string
+	timeStart  time.Time
+	stdout     []string
+}
+
+func (hc *commandHealthChecker) Defined() bool {
+	return len(hc.newCommand) >= 1 && hc.newCommand[0] != ""
+}
+
+func (hc *commandHealthChecker) TimeStart() time.Time {
+	return hc.timeStart
+}
+
+func (hc *commandHealthChecker) Events() []string {
+	return hc.stdout
+}
+
+func (hc *commandHealthChecker) Perform(c *Container) (status define.HealthCheckStatus, exitCode int, retErr error) {
 	rPipe, wPipe, err := os.Pipe()
 	if err != nil {
-		return define.HealthCheckInternalError, "", fmt.Errorf("unable to create pipe for healthcheck session: %w", err)
+		return define.HealthCheckInternalError, 0, fmt.Errorf("unable to create pipe for healthcheck session: %w", err)
 	}
 	defer wPipe.Close()
 	defer rPipe.Close()
@@ -107,20 +99,109 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	streams.AttachError = true
 	streams.AttachInput = true
 
-	stdout := []string{}
 	go func() {
 		scanner := bufio.NewScanner(rPipe)
 		for scanner.Scan() {
-			stdout = append(stdout, scanner.Text())
+			hc.stdout = append(hc.stdout, scanner.Text())
 		}
 	}()
 
-	logrus.Debugf("executing health check command %s for %s", strings.Join(newCommand, " "), c.ID())
-	timeStart := time.Now()
-	hcResult := define.HealthCheckSuccess
+	logrus.Debugf("executing health check command %s for %s", strings.Join(hc.newCommand, " "), c.ID())
+	hc.timeStart = time.Now()
 	config := new(ExecConfig)
-	config.Command = newCommand
+	config.Command = hc.newCommand
 	exitCode, hcErr := c.exec(config, streams, nil, true)
+	return define.HealthCheckSuccess, exitCode, hcErr
+}
+
+type httpHealthChecker struct {
+	timeStart time.Time
+}
+
+func (hc *httpHealthChecker) Defined() bool {
+	return false // TODO
+}
+
+func (hc *httpHealthChecker) TimeStart() time.Time {
+	return hc.timeStart
+}
+
+func (hc *httpHealthChecker) Events() []string {
+	return []string{} // TODO
+}
+
+func (hc *httpHealthChecker) Perform(*Container) (status define.HealthCheckStatus, exitCode int, retErr error) {
+	hc.timeStart = time.Now()
+	return define.HealthCheckSuccess, 0, nil // TODO
+}
+
+type tcpHealthChecker struct {
+	timeStart time.Time
+}
+
+func (hc *tcpHealthChecker) Defined() bool {
+	return false
+}
+
+func (hc *tcpHealthChecker) TimeStart() time.Time {
+	return hc.timeStart
+}
+
+func (hc *tcpHealthChecker) Events() []string {
+	return []string{} // TODO
+}
+
+func (hc *tcpHealthChecker) Perform(*Container) (status define.HealthCheckStatus, exitCode int, retErr error) {
+	hc.timeStart = time.Now()
+	return define.HealthCheckSuccess, 0, nil // TODO
+}
+
+func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.HealthCheckStatus, string, error) {
+	var (
+		returnCode    int
+		inStartPeriod bool
+	)
+
+	hcCommand := c.HealthCheckConfig().Test
+	if isStartup {
+		logrus.Debugf("Running startup healthcheck for container %s", c.ID())
+		hcCommand = c.config.StartupHealthCheckConfig.Test
+	}
+	if len(hcCommand) < 1 {
+		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
+	}
+	var checker healthChecker
+	switch hcCommand[0] {
+	case "", define.HealthConfigTestNone:
+		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
+	case define.HealthConfigTestCmd:
+		checker = &commandHealthChecker{
+			newCommand: hcCommand[1:],
+		}
+	case define.HealthConfigTestCmdShell:
+		// TODO: SHELL command from image not available in Container - use Docker default
+		checker = &commandHealthChecker{
+			newCommand: []string{"/bin/sh", "-c", strings.Join(hcCommand[1:], " ")},
+		}
+	case define.HealthConfigTestHttpGet:
+		checker = &httpHealthChecker{} // TODO
+	case define.HealthConfigTestTcp:
+		checker = &tcpHealthChecker{} // TODO
+	default:
+		// command supplied on command line - pass as-is
+		checker = &commandHealthChecker{
+			newCommand: hcCommand,
+		}
+	}
+	if !checker.Defined() {
+		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
+	}
+	hcResult, exitCode, hcErr := checker.Perform(c)
+	if hcResult != define.HealthCheckSuccess {
+		// We were unable to run the checker at all. That counts as
+		// neither a success nor a failure.
+		return hcResult, "", hcErr
+	}
 	if hcErr != nil {
 		hcResult = define.HealthCheckFailure
 		if errors.Is(hcErr, define.ErrOCIRuntimeNotFound) ||
@@ -151,25 +232,25 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	if c.HealthCheckConfig().StartPeriod > 0 {
 		// there is a start-period we need to honor; we add startPeriod to container start time
 		startPeriodTime := c.state.StartedTime.Add(c.HealthCheckConfig().StartPeriod)
-		if timeStart.Before(startPeriodTime) {
+		if checker.TimeStart().Before(startPeriodTime) {
 			// we are still in the start period, flip the inStartPeriod bool
 			inStartPeriod = true
 			logrus.Debugf("healthcheck for %s being run in start-period", c.ID())
 		}
 	}
 
-	eventLog := strings.Join(stdout, "\n")
+	eventLog := strings.Join(checker.Events(), "\n")
 	if len(eventLog) > MaxHealthCheckLogLength {
 		eventLog = eventLog[:MaxHealthCheckLogLength]
 	}
 
-	if timeEnd.Sub(timeStart) > c.HealthCheckConfig().Timeout {
+	if timeEnd.Sub(checker.TimeStart()) > c.HealthCheckConfig().Timeout {
 		returnCode = -1
 		hcResult = define.HealthCheckFailure
 		hcErr = fmt.Errorf("healthcheck command exceeded timeout of %s", c.HealthCheckConfig().Timeout.String())
 	}
 
-	hcl := newHealthCheckLog(timeStart, timeEnd, returnCode, eventLog)
+	hcl := newHealthCheckLog(checker.TimeStart(), timeEnd, returnCode, eventLog)
 	logStatus, err := c.updateHealthCheckLog(hcl, inStartPeriod, isStartup)
 	if err != nil {
 		return hcResult, "", fmt.Errorf("unable to update health check log %s for %s: %w", c.healthCheckLogPath(), c.ID(), err)
