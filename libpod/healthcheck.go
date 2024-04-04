@@ -184,8 +184,14 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 			newCommand: []string{"/bin/sh", "-c", strings.Join(hcCommand[1:], " ")},
 		}
 	case define.HealthConfigTestHttpGet:
+		// hcCommand[1] is the URL
+		// hcCommand[2:] are alternating header name and value
+		// See encoding in pkg/specgen/generate/kube.probeToHealthConfig.
 		checker = &httpHealthChecker{} // TODO
 	case define.HealthConfigTestTcp:
+		// hcCommand[1] is the host
+		// hcCommand[2] is the port number
+		// See encoding in pkg/specgen/generate/kube.probeToHealthConfig.
 		checker = &tcpHealthChecker{} // TODO
 	default:
 		// command supplied on command line - pass as-is

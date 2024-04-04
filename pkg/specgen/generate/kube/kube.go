@@ -660,20 +660,15 @@ func parseMountPath(mountPath string, readOnly bool, propagationMode *v1.MountPr
 }
 
 func probeToHealthConfig(probe *v1.Probe, containerPorts []v1.ContainerPort) (*manifest.Schema2HealthConfig, error) {
-	var commandString string
-	failureCmd := "exit 1"
+	var commandStrings []string
 	probeHandler := probe.Handler
 	host := "localhost" // Kubernetes default is host IP, but with Podman currently we run inside the container
 
 	// configure healthcheck on the basis of Handler Actions.
 	switch {
 	case probeHandler.Exec != nil:
-		// `makeHealthCheck` function can accept a json array as the command.
-		cmd, err := json.Marshal(probeHandler.Exec.Command)
-		if err != nil {
-			return nil, err
-		}
-		commandString = string(cmd)
+		commandStrings = []string{define.HealthConfigTestCmd}
+		commandStrings = append(commandStrings, probeHandler.Exec.Command...)
 	case probeHandler.HTTPGet != nil:
 		// set defaults as in https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#http-probes
 		uriScheme := v1.URISchemeHTTP
@@ -691,7 +686,13 @@ func probeToHealthConfig(probe *v1.Probe, containerPorts []v1.ContainerPort) (*m
 		if err != nil {
 			return nil, err
 		}
-		commandString = fmt.Sprintf("curl -f %s://%s:%d%s || %s", uriScheme, host, portNum, path, failureCmd)
+		commandStrings = []string{
+			define.HealthConfigTestHttpGet,
+			fmt.Sprintf("%s://%s:%d%s", uriScheme, host, portNum, path),
+		}
+		for _, header := range probeHandler.HTTPGet.HTTPHeaders {
+			commandStrings = append(commandStrings, header.Name, header.Value)
+		}
 	case probeHandler.TCPSocket != nil:
 		portNum, err := getPortNumber(probeHandler.TCPSocket.Port, containerPorts)
 		if err != nil {
@@ -700,9 +701,13 @@ func probeToHealthConfig(probe *v1.Probe, containerPorts []v1.ContainerPort) (*m
 		if probeHandler.TCPSocket.Host != "" {
 			host = probeHandler.TCPSocket.Host
 		}
-		commandString = fmt.Sprintf("nc -z -v %s %d || %s", host, portNum, failureCmd)
+		commandStrings = []string{
+			define.HealthConfigTestTcp,
+			host,
+			strconv.Itoa(portNum),
+		}
 	}
-	return makeHealthCheck(commandString, probe.PeriodSeconds, probe.FailureThreshold, probe.TimeoutSeconds, probe.InitialDelaySeconds)
+	return makeHealthCheck(commandStrings, probe.PeriodSeconds, probe.FailureThreshold, probe.TimeoutSeconds, probe.InitialDelaySeconds)
 }
 
 func getPortNumber(port intstr.IntOrString, containerPorts []v1.ContainerPort) (int, error) {
@@ -753,7 +758,11 @@ func setupStartupProbe(s *specgen.SpecGenerator, containerYAML v1.Container, res
 		// currently, StartupProbe still an optional feature, and it requires HealthConfig.
 		if s.HealthConfig == nil {
 			probe := containerYAML.StartupProbe
-			s.HealthConfig, err = makeHealthCheck("exit 0", probe.PeriodSeconds, probe.FailureThreshold, probe.TimeoutSeconds, probe.InitialDelaySeconds)
+			commandStrings := []string{
+				define.HealthConfigTestCmdShell,
+				"exit 0",
+			}
+			s.HealthConfig, err = makeHealthCheck(commandStrings, probe.PeriodSeconds, probe.FailureThreshold, probe.TimeoutSeconds, probe.InitialDelaySeconds)
 			if err != nil {
 				return err
 			}
@@ -771,27 +780,12 @@ func setupStartupProbe(s *specgen.SpecGenerator, containerYAML v1.Container, res
 	return nil
 }
 
-func makeHealthCheck(inCmd string, interval int32, retries int32, timeout int32, startPeriod int32) (*manifest.Schema2HealthConfig, error) {
+func makeHealthCheck(cmd []string, interval int32, retries int32, timeout int32, startPeriod int32) (*manifest.Schema2HealthConfig, error) {
 	// Every healthcheck requires a command
-	if len(inCmd) == 0 {
+	if len(cmd) == 0 {
 		return nil, errors.New("must define a healthcheck command for all healthchecks")
 	}
 
-	// first try to parse option value as JSON array of strings...
-	cmd := []string{}
-
-	if inCmd == "none" {
-		cmd = []string{define.HealthConfigTestNone}
-	} else {
-		err := json.Unmarshal([]byte(inCmd), &cmd)
-		if err != nil {
-			// ...otherwise pass it to "/bin/sh -c" inside the container
-			cmd = []string{define.HealthConfigTestCmdShell}
-			cmd = append(cmd, strings.Split(inCmd, " ")...)
-		} else {
-			cmd = append([]string{define.HealthConfigTestCmd}, cmd...)
-		}
-	}
 	hc := manifest.Schema2HealthConfig{
 		Test: cmd,
 	}
