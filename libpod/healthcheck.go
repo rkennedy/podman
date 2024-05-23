@@ -59,23 +59,17 @@ func (r *Runtime) HealthCheck(ctx context.Context, name string) (define.HealthCh
 
 type healthChecker interface {
 	Defined() bool
-	TimeStart() time.Time
 	Perform(c *Container) (status define.HealthCheckStatus, exitCode int, retErr error)
 	Events() []string
 }
 
 type commandHealthChecker struct {
 	newCommand []string
-	timeStart  time.Time
 	stdout     []string
 }
 
 func (hc *commandHealthChecker) Defined() bool {
 	return len(hc.newCommand) >= 1 && hc.newCommand[0] != ""
-}
-
-func (hc *commandHealthChecker) TimeStart() time.Time {
-	return hc.timeStart
 }
 
 func (hc *commandHealthChecker) Events() []string {
@@ -107,7 +101,6 @@ func (hc *commandHealthChecker) Perform(c *Container) (status define.HealthCheck
 	}()
 
 	logrus.Debugf("executing health check command %s for %s", strings.Join(hc.newCommand, " "), c.ID())
-	hc.timeStart = time.Now()
 	config := new(ExecConfig)
 	config.Command = hc.newCommand
 	exitCode, hcErr := c.exec(config, streams, nil, true)
@@ -115,15 +108,10 @@ func (hc *commandHealthChecker) Perform(c *Container) (status define.HealthCheck
 }
 
 type httpHealthChecker struct {
-	timeStart time.Time
 }
 
 func (hc *httpHealthChecker) Defined() bool {
 	return false // TODO
-}
-
-func (hc *httpHealthChecker) TimeStart() time.Time {
-	return hc.timeStart
 }
 
 func (hc *httpHealthChecker) Events() []string {
@@ -131,20 +119,14 @@ func (hc *httpHealthChecker) Events() []string {
 }
 
 func (hc *httpHealthChecker) Perform(*Container) (status define.HealthCheckStatus, exitCode int, retErr error) {
-	hc.timeStart = time.Now()
 	return define.HealthCheckSuccess, 0, nil // TODO
 }
 
 type tcpHealthChecker struct {
-	timeStart time.Time
 }
 
 func (hc *tcpHealthChecker) Defined() bool {
 	return false
-}
-
-func (hc *tcpHealthChecker) TimeStart() time.Time {
-	return hc.timeStart
 }
 
 func (hc *tcpHealthChecker) Events() []string {
@@ -152,7 +134,6 @@ func (hc *tcpHealthChecker) Events() []string {
 }
 
 func (hc *tcpHealthChecker) Perform(*Container) (status define.HealthCheckStatus, exitCode int, retErr error) {
-	hc.timeStart = time.Now()
 	return define.HealthCheckSuccess, 0, nil // TODO
 }
 
@@ -202,6 +183,7 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	if !checker.Defined() {
 		return define.HealthCheckNotDefined, "", fmt.Errorf("container %s has no defined healthcheck", c.ID())
 	}
+	timeStart := time.Now()
 	hcResult, exitCode, hcErr := checker.Perform(c)
 	if hcResult != define.HealthCheckSuccess {
 		// We were unable to run the checker at all. That counts as
@@ -238,7 +220,7 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 	if c.HealthCheckConfig().StartPeriod > 0 {
 		// there is a start-period we need to honor; we add startPeriod to container start time
 		startPeriodTime := c.state.StartedTime.Add(c.HealthCheckConfig().StartPeriod)
-		if checker.TimeStart().Before(startPeriodTime) {
+		if timeStart.Before(startPeriodTime) {
 			// we are still in the start period, flip the inStartPeriod bool
 			inStartPeriod = true
 			logrus.Debugf("healthcheck for %s being run in start-period", c.ID())
@@ -250,13 +232,13 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 		eventLog = eventLog[:MaxHealthCheckLogLength]
 	}
 
-	if timeEnd.Sub(checker.TimeStart()) > c.HealthCheckConfig().Timeout {
+	if timeEnd.Sub(timeStart) > c.HealthCheckConfig().Timeout {
 		returnCode = -1
 		hcResult = define.HealthCheckFailure
 		hcErr = fmt.Errorf("healthcheck command exceeded timeout of %s", c.HealthCheckConfig().Timeout.String())
 	}
 
-	hcl := newHealthCheckLog(checker.TimeStart(), timeEnd, returnCode, eventLog)
+	hcl := newHealthCheckLog(timeStart, timeEnd, returnCode, eventLog)
 	logStatus, err := c.updateHealthCheckLog(hcl, inStartPeriod, isStartup)
 	if err != nil {
 		return hcResult, "", fmt.Errorf("unable to update health check log %s for %s: %w", c.healthCheckLogPath(), c.ID(), err)
