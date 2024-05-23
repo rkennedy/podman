@@ -663,6 +663,7 @@ func probeToHealthConfig(probe *v1.Probe, containerPorts []v1.ContainerPort) (*m
 	var commandStrings []string
 	probeHandler := probe.Handler
 	host := "localhost" // Kubernetes default is host IP, but with Podman currently we run inside the container
+	// TODO Figure out the host IP, since we're not running inside the container anymore.
 
 	// configure healthcheck on the basis of Handler Actions.
 	switch {

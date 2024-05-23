@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,10 +110,13 @@ func (hc *commandHealthChecker) Perform(c *Container) (status define.HealthCheck
 }
 
 type httpHealthChecker struct {
+	url     string
+	headers http.Header
+	timeout time.Duration
 }
 
 func (hc *httpHealthChecker) Defined() bool {
-	return false // TODO
+	return hc.url != ""
 }
 
 func (hc *httpHealthChecker) Events() []string {
@@ -119,7 +124,26 @@ func (hc *httpHealthChecker) Events() []string {
 }
 
 func (hc *httpHealthChecker) Perform(*Container) (status define.HealthCheckStatus, exitCode int, retErr error) {
-	return define.HealthCheckSuccess, 0, nil // TODO
+	req, err := http.NewRequest("GET", hc.url, nil)
+	if err != nil {
+		return define.HealthCheckInternalError, 0, fmt.Errorf("Failed to prepare HTTP request: %w", err)
+	}
+	req.Header = hc.headers
+	// TODO Set Header["User-Agent"] if not already set?
+	client := http.Client{
+		Timeout: hc.timeout,
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return define.HealthCheckInternalError, 0, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, res.Body)
+
+	if res.StatusCode >= http.StatusOK && res.StatusCode < http.StatusBadRequest {
+		return define.HealthCheckSuccess, 0, nil
+	}
+	return define.HealthCheckSuccess, res.StatusCode, nil
 }
 
 type tcpHealthChecker struct {
@@ -168,7 +192,20 @@ func (c *Container) runHealthCheck(ctx context.Context, isStartup bool) (define.
 		// hcCommand[1] is the URL
 		// hcCommand[2:] are alternating header name and value
 		// See encoding in pkg/specgen/generate/kube.probeToHealthConfig.
-		checker = &httpHealthChecker{} // TODO
+		var headers http.Header
+		// We _expect_ hcCommand to have an even number of elements. If
+		// it's created by probeToHealthConfig, then that's assured. If
+		// it's created some other way, then we might need to check
+		// before iterating over it here.
+		for i := 2; i < len(hcCommand); i += 2 {
+			headers.Add(hcCommand[i], hcCommand[i+1])
+		}
+		checker = &httpHealthChecker{
+			url: hcCommand[1],
+			headers: headers,
+			timeout: c.HealthCheckConfig().Timeout,
+		}
+
 	case define.HealthConfigTestTcp:
 		// hcCommand[1] is the host
 		// hcCommand[2] is the port number
